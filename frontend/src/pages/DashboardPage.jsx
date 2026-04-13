@@ -29,7 +29,7 @@ const DashboardPage = () => {
     useEffect(() => {
         fetchData();
         // Cập nhật dữ liệu mỗi 3 giây
-        const interval = setInterval(fetchData, 3000);
+        const interval = setInterval(fetchData, 1000);
         return () => clearInterval(interval);
     }, []);
 

@@ -20,7 +20,6 @@ router.get('/', async (req, res) => {
 
 // ADD region
 router.post('/', async (req, res) => {
-    // Note: Schema2 uses ma_khu_vuc (VARCHAR) instead of auto-increment ID
     const { ma_khu_vuc, loai_thuy_san, ma_nguoi_dung_quan_ly } = req.body; 
     
     try {

@@ -6,55 +6,56 @@ import datetime
 import sys
 # from Adafruit_IO import MQTTClient
 
-# ==========================================
-# CẤU TRÚC DỮ LIỆU CHO 2 AO NUÔI
-# ==========================================
-ponds_data = {
-    "1": { # Tương ứng với ao 1 (ID từ mạch gửi lên: !1:TEMP:32.5#)
-        "ao_id": "AO_01",
-        "feeder_id": "DK_FEEDER_01",
-        "config": {
-            "DO": {"min": 5.0, "max": 7.0},
-            "PH": {"min": 5.0, "max": 8.0},
-            "TEMP": {"high": 28, "low": 25},
-            "MODE": "AUTO"
-        },
-        "device_status": {
-            "AERATOR": "OFF",
-            "PUMP": "OFF",
-            "FAN": "OFF",
-            "FEEDER": "OFF"
-        },
-        "sensor_ids": {
-            "TEMP": "CB_TEMP_01",
-            "DO": "CB_DO_01",
-            "PH": "CB_PH_01"
-        },
-        "schedules": []
-    },
-    "2": { # Tương ứng với ao 2 (ID từ mạch gửi lên: !2:TEMP:32.5#)
-        "ao_id": "AO_02",
-        "feeder_id": "DK_FEEDER_02", # ID máy cho ăn của ao 2
-        "config": {
-            "DO": {"min": 5.0, "max": 7.0},
-            "PH": {"min": 5.0, "max": 8.0},
-            "TEMP": {"high": 28, "low": 25},
-            "MODE": "AUTO"
-        },
-        "device_status": {
-            "AERATOR": "OFF",
-            "PUMP": "OFF",
-            "FAN": "OFF",
-            "FEEDER": "OFF"
-        },
-        "sensor_ids": {
-            "TEMP": "CB_TEMP_02", # Các ID này phải khớp với database
-            "DO": "CB_DO_02",
-            "PH": "CB_PH_02"
-        },
-        "schedules": []
-    }
-}
+# Biến toàn cục lưu trữ dữ liệu và cấu hình cho từng ao
+ponds_data = {}
+#láy config của các ao từ database
+def init_ponds_data_from_server():
+    global ponds_data
+    try:
+        print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Đang tải dữ liệu cấu trúc hệ thống từ Server...")
+        # Gọi API mới mà bạn sẽ viết bên Node.js (tên API do bạn tự định nghĩa)
+        response = requests.get("http://127.0.0.1:5000/api/ponds/gateway-init", timeout=5)
+        
+        if response.status_code == 200:
+            server_ponds = response.json()
+
+            #reset lại ponds_data trước khi nạp mới
+            ponds_data = {}
+            
+            for pond in server_ponds:
+                gateway_id = str(pond.get("gateway_id")) # VD: "1" hoặc "2"
+                
+                # Nạp dữ liệu động vào ponds_data (dữ liệu mặt đính -> sẽ được đồng bộ và thay đổi sau)
+                ponds_data[gateway_id] = {
+                    "ao_id": pond["ao_id"],
+                    "feeder_id": pond["feeder_id"],
+                    "config": {
+                        "DO": {"min": 5.0, "max": 7.0},  # Sẽ được cập nhật lại bằng sync_config_from_server
+                        "PH": {"min": 5.0, "max": 8.0},
+                        "TEMP": {"high": 28, "low": 25},
+                        "MODE": "AUTO"
+                    },
+                    "device_status": {
+                        "AERATOR": "OFF",
+                        "PUMP": "OFF",
+                        "FAN": "OFF",
+                        "FEEDER": "OFF"
+                    },
+                    "sensor_ids": pond["sensor_ids"], # Lấy dict sensor ids từ server
+                    "schedules": []
+                }
+            print("✅ Đã khởi tạo cấu trúc ao thành công từ Database!")
+            
+            # Sau khi có cấu trúc, lập tức đồng bộ config và lịch trình
+            for pond_key in ponds_data.keys():
+                sync_config_from_server(pond_key)
+                sync_schedules_from_server(pond_key)
+                
+        else:
+            print(f"❌ Lỗi tải dữ liệu ao: Server trả về mã {response.status_code}")
+    except Exception as e:
+        print(f"❌ Không thể kết nối tới Server để khởi tạo dữ liệu: {e}")
+        sys.exit() # Nếu không load được dữ liệu gốc thì nên dừng chương trình
 
 # ==========================================
 # CÁC HÀM GIAO TIẾP SERVER & ĐIỀU KHIỂN
@@ -92,22 +93,7 @@ def sync_config_from_server(pond_key):
     except Exception as e:
         print(f"Lỗi đồng bộ cấu hình ao {pond_key}: {e}")
 
-
-# def control_device(pond_key, device_name, action):
-#     global isMicrobitConnected
-    
-#     # Kiểm tra trạng thái hiện tại, nếu khác thì mới gửi lệnh
-#     if ponds_data[pond_key]["device_status"][device_name] != action:
-#         ponds_data[pond_key]["device_status"][device_name] = action
-#         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] LỆNH ĐIỀU KHIỂN AO {pond_key}: {device_name} -> {action}")
-        
-#         if isMicrobitConnected:
-#             try:
-#                 # Gửi lệnh kèm ID ao. VD: "!1:FAN:ON#" hoặc "!2:PUMP:OFF#"
-#                 command = f"!{pond_key}:{device_name}:{action}#\n"
-#                 ser.write(command.encode("UTF-8"))
-#             except Exception as e:
-#                 print(f"❌ Lỗi gửi lệnh xuống mạch ao {pond_key}: {e}")
+# Hàm điều khiển thiết bị, gửi lệnh xuống mạch khi vượt ngưỡng
 def control_device(pond_key, device_name, action):
     global isMicrobitConnected
     
@@ -141,15 +127,17 @@ def control_device(pond_key, device_name, action):
             except Exception as e:
                 print(f"❌ Lỗi gửi lệnh xuống mạch ao {pond_key}: {e}")
 
-
+# Logic điều khiển bật tắt thiết bị dựa trên ngưỡng cảm biến và chế độ AUTO/MANUAL
 def processData(pond_key, sensor_type, value):
     if pond_key not in ponds_data:
         print(f"⚠️ Không tìm thấy cấu hình cho Ao ID: {pond_key}")
         return
 
+    # Lấy cấu hình và sensor_ids tương ứng với ao hiện tại
     config = ponds_data[pond_key]["config"]
     sensor_ids = ponds_data[pond_key]["sensor_ids"]
 
+    #Debug: In thông tin cảm biến nhận được
     print(f"Ao {pond_key} - Cảm biến {sensor_type} đo được: {value}")
     
     # Chỉ tự động chạy nếu đang ở chế độ AUTO
@@ -172,7 +160,7 @@ def processData(pond_key, sensor_type, value):
             elif value <= config["TEMP"]["low"]:
                 control_device(pond_key, "FAN", "OFF")
 
-    # Gửi dữ liệu về backend
+    # Gửi dữ liệu về backend    
     try:
         device_id = sensor_ids.get(sensor_type, "CB_UNKNOWN")
         res = requests.post("http://127.0.0.1:5000/api/sensors", json={
@@ -211,15 +199,14 @@ def check_feeder_schedule():
             control_device(pond_key, "FEEDER", "ON")
         else:
             control_device(pond_key, "FEEDER", "OFF")
+        
 
-# ==========================================
-# SERIAL GIAO TIẾP VỚI MẠCH
-# ==========================================
+#kiểm tra kết nối với microbit, nếu kết nối được thì đọc dữ liệu thực tế, nếu không thì fake dữ liệu để test
 isMicrobitConnected = False
 try:
     ser = serial.Serial(port="COM6", baudrate=115200, timeout=1)
     isMicrobitConnected = True
-    print("✅ Đã kết nối thành công với mạch trên cổng COM3")
+    print("✅ Đã kết nối thành công với mạch trên cổng COM")
 except Exception as e:
     print(f"❌ Lỗi kết nối cổng Serial COM: {e}")
     isMicrobitConnected = False
@@ -228,10 +215,10 @@ except Exception as e:
 
 # Biến toàn cục lưu nhiệt độ thật gần nhất nhận được
 latest_real_temp = 28.5  # Giá trị mặc định ban đầu
-real_temp_pond_id = "1"  # Mặc định ao 1 là ao có gắn cảm biến thật
+real_temp_pond_id = ""  # khi kết nối mạch thật thì gán nó bằng 1
 
 mess = "" 
-
+# Hàm phân tích dữ liệu Serial nhận được từ mạch
 def parseSerialData(data_string):
     global latest_real_temp, real_temp_pond_id
     """
@@ -246,7 +233,7 @@ def parseSerialData(data_string):
             sensor_type = splitData[1]  
             value = float(splitData[2]) 
 
-            # Nếu nhận được nhiệt độ thật từ mạch, lưu lại làm chuẩn
+            # Nếu nhận được nhiệt độ thật từ mạch, lưu lại làm chuẩn, để gen ra nhiệt độ ảo
             if sensor_type == "TEMP":
                 latest_real_temp = value
                 real_temp_pond_id = pond_key # Cập nhật ID ao đang sở hữu cảm biến thật
@@ -256,7 +243,7 @@ def parseSerialData(data_string):
     except Exception as e:
         print(f"⚠️ Lỗi phân tích dữ liệu Serial: {data_string} -> {e}")
 
-
+#đọc dữ liệu từ cổng serial, tìm kiếm chuỗi dữ liệu hoàn chỉnh nằm giữa '!' và '#', sau đó gọi hàm parseSerialData để xử lý
 def readSerial():
     global mess
     if not isMicrobitConnected:
@@ -282,7 +269,7 @@ def readSerial():
     except Exception as e:
         pass
 
-
+# Hàm tạo dữ liệu giả cho DO, PH và TEMP (chỉ fake TEMP cho ao không có cảm biến thật)
 def fakeSerial():
     global latest_real_temp, real_temp_pond_id
     
@@ -301,582 +288,52 @@ def fakeSerial():
             fake_temp = round(latest_real_temp + random.uniform(-0.5, 0.5), 1)
             processData(pond_key, "TEMP", fake_temp)
 
+# Hàm kiểm tra tín hiệu reload từ server để cập nhật lại cấu trúc ao nếu có thay đổi
+def check_reload_signal():
+    global ponds_data
+    try:
+        # Gọi API check-reload với timeout rất ngắn để không treo vòng lặp
+        response = requests.get("http://127.0.0.1:5000/api/ponds/check-reload", timeout=1)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("reload") == True:
+                print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Phát hiện thay đổi cấu trúc ao! Đang cập nhật...")
+                
+                # Gọi lại hàm khởi tạo để cập nhật ponds_data
+                init_ponds_data_from_server()
+                
+    except Exception as e:
+        # Không in lỗi quá nhiều nếu server chỉ mất kết nối tạm thời
+        pass
+
 
 # ==========================================
 # VÒNG LẶP CHÍNH
 # ==========================================
+#gọi để lấy dữ liệu cấu trúc ao từ db duy nhất 1 lần
+init_ponds_data_from_server()
+
 sync_counter = 0
 
 while True:
     # 1. Định kỳ đồng bộ cấu hình cho tất cả các ao
-    if sync_counter % 3 == 0:
-        for pond_key in ponds_data.keys():
+    if sync_counter % 3 == 0: # Mỗi 3 vòng (tương đương khoảng 9-10 giây) sẽ đồng bộ một lần
+        for pond_key in list(ponds_data.keys()):
             sync_config_from_server(pond_key)
             sync_schedules_from_server(pond_key)
     sync_counter += 1
 
-    # 2. Đọc dữ liệu
+    # 2. Đọc dữ liệu thực tế từ mạch và tạo dữ liệu giả
     if isMicrobitConnected:
         readSerial()
-        fakeSerial() # Uncomment dòng này nếu muốn test chạy bằng data ảo
+        fakeSerial() 
     else:
-        pass
+        fakeSerial() 
 
     # 3. Kiểm tra lịch cho ăn
     check_feeder_schedule()
+
+    # 4. Kiểm tra tín hiệu reload khi có thay đổi (vd: thêm/sửa/xóa ao, thiết bị, cảm biến...)
+    check_reload_signal()
     
     time.sleep(3)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# #chạy được thiết bị nhưng với 1 ao
-# import serial.tools.list_ports
-# import requests
-# import random
-# import time
-# import datetime
-# import sys
-# from Adafruit_IO import MQTTClient
-
-
-# schedules = []
-
-# config = {
-#     "DO": {"min": 5.0, "max": 7.0},   # Oxy < 5 -> Bật sục khí, > 7 -> Tắt sục khí
-#     "PH": {"min": 5.0, "max": 8.0},   # pH ngoài khoảng 5-8 -> Bật bơm, trong khoảng -> Tắt
-#     "TEMP": {"high": 28, "low": 25}, # Nhiệt độ > 40 -> Bật quạt, < 30 -> Tắt quạt
-#     "MODE": "AUTO" # Chế độ: AUTO hoặc MANUAL
-# }
-
-# # Trạng thái thiết bị hiện tại
-# device_status = {
-#     "AERATOR": "OFF", # Máy sục khí
-#     "PUMP": "OFF",    # Máy bơm
-#     "FAN": "OFF",     # Quạt
-#     "FEEDER": "OFF"   # Máy cho ăn
-# }
-
-# sensor_id_map = {
-#     "TEMP": "CB_TEMP_01",
-#     "DO": "CB_DO_01",
-#     "PH": "CB_PH_01"
-# }
-
-# # Thêm hàm đồng bộ lịch trình từ server
-# def sync_schedules_from_server(tbtaibien_id="DK_FEEDER_01"): # Sử dụng string ID
-#     global schedules
-#     try:
-#         # Đường dẫn route đã được chuẩn hóa trong routes/devices.js
-#         response = requests.get(f"http://127.0.0.1:5000/api/devices/gateway/{tbtaibien_id}", timeout=3)
-#         if response.status_code == 200:
-#             schedules = response.json().get("schedules", [])
-#             print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Đã đồng bộ Lịch trình thành công!")
-#     except Exception as e:
-#         print(f"Lỗi đồng bộ lịch trình: {e}")
-
-# # config threshold
-# def sync_config_from_server(ao_id="AO_01"): # Sử dụng string ID
-#     global config
-#     try:
-#         # Gọi API lấy cấu hình từ Backend
-#         response = requests.get(f"http://127.0.0.1:5000/api/ponds/{ao_id}/config", timeout=3)
-#         if response.status_code == 200:
-#             server_configs = response.json().get("configs", [])
-            
-#             # Cập nhật lại biến config của Gateway từ dữ liệu Database
-#             for item in server_configs:
-#                 loai = item["LoaiCamBien"] # VD: "TEMP", "DO", "PH"
-#                 if loai == "TEMP":
-#                     config["TEMP"]["low"] = item["min_value"]
-#                     config["TEMP"]["high"] = item["max_value"]
-#                 elif loai in ["DO", "PH"]:
-#                     config[loai]["min"] = item["min_value"]
-#                     config[loai]["max"] = item["max_value"]
-            
-#             print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Đã đồng bộ cấu hình từ Server thành công!")
-#     except Exception as e:
-#         print(f"Lỗi đồng bộ cấu hình (Server có thể đang tắt): {e}")
-
-
-# #gửi lệnh điều khiển xuống mạch vd như control_device("FAN", "ON") hoặc control_device("PUMP", "OFF")
-# def control_device(device_name, action):
-#     global device_status, isMicrobitConnected
-#     if device_status[device_name] != action:
-#         device_status[device_name] = action
-#         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] LỆNH ĐIỀU KHIỂN: {device_name} -> {action}")
-        
-#         # --- THÊM ĐOẠN NÀY ĐỂ GỬI LỆNH XUỐNG MẠCH ---
-#         if isMicrobitConnected:
-#             try:
-#                 # Đóng gói lệnh gửi xuống, ví dụ: "!FAN:ON#" hoặc "!FAN:OFF#"
-#                 command = f"!{device_name}:{action}#\n"
-#                 # print(command) # Debug: In lệnh trước khi gửi
-#                 ser.write(command.encode("UTF-8"))
-#             except Exception as e:
-#                 print(f"❌ Lỗi gửi lệnh xuống mạch: {e}")
-
-# #logic điều khiển bặt tắt thiết bị
-# def processData(sensor_type, value):
-#     global config
-#     if sensor_type == "TEMP":
-#         print("\n===== DEBUG =====")
-#     print(f"Cảm biến {sensor_type} đo được: {value}")
-    
-#     # Chỉ tự động chạy nếu đang ở chế độ AUTO
-#     if config["MODE"] == "AUTO":
-#         if sensor_type == "DO":
-#             if value < config["DO"]["min"]:
-#                 control_device("AERATOR", "ON")
-#             elif value > config["DO"]["max"]:
-#                 control_device("AERATOR", "OFF")
-                
-#         elif sensor_type == "PH":
-#             if value < config["PH"]["min"] or value > config["PH"]["max"]:
-#                 control_device("PUMP", "ON")
-#             else:
-#                 control_device("PUMP", "OFF")
-                
-#         elif sensor_type == "TEMP":
-#             if value > config["TEMP"]["high"]:
-#                 control_device("FAN", "ON")
-#             elif value <= config["TEMP"]["low"]:
-#                 control_device("FAN", "OFF")
-
-#     # Gửi dữ liệu về backend
-#     try:
-#         # Schema2: Bỏ tự sinh "id", Database xử lý AUTO_INCREMENT
-#         res = requests.post("http://127.0.0.1:5000/api/sensors", json={
-#             "device_id": sensor_id_map.get(sensor_type, "CB_UNKNOWN"), 
-#             "value": value
-#         })
-        
-#         if res.status_code == 200:
-#             print(f"  -> Đã gửi {sensor_type} lên Server. Kết quả: 200 (OK)")
-#         else:
-#             print(f"  -> SERVER BÁO LỖI: {res.status_code} - Chi tiết: {res.text}")
-            
-#     except Exception as e:
-#         print(f"  -> LỖI GỬI API SENSOR: {e}")
-
-
-# #logic kiểm tra lịch cho ăn và bật/tắt máy cho ăn FEEDER 
-# def check_feeder_schedule():
-#     global schedules
-#     # Chỉ lấy phần Time (Giờ:Phút:Giây)
-#     now_time = datetime.datetime.now().time() 
-    
-#     should_run = False
-#     for sched in schedules:
-#         try:
-#             # MySQL TIME format is "HH:MM:SS"
-#             start = datetime.datetime.strptime(sched["start_time"], "%H:%M:%S").time()
-#             end = datetime.datetime.strptime(sched["end_time"], "%H:%M:%S").time()
-            
-#             # Kiểm tra giờ hiện tại có nằm trong khoảng lịch trình không
-#             if start <= now_time <= end:
-#                 should_run = True
-#                 break
-#         except ValueError:
-#             print(f"  -> Lỗi parsing thời gian lịch trình: {sched}")
-            
-#     if should_run:
-#         control_device("FEEDER", "ON")
-#     else:
-#         control_device("FEEDER", "OFF")
-
-
-
-# #kết nối với microbit
-# isMicrobitConnected = False
-# try:
-#     # Kết nối trực tiếp vào COM với baudrate 115200 (chuẩn của OhStem/Microbit)
-#     ser = serial.Serial(port="COM3", baudrate=115200, timeout=1)
-#     isMicrobitConnected = True
-#     print("✅ Đã kết nối thành công với mạch trên cổng COM5")
-# except Exception as e:
-#     print(f"❌ Lỗi kết nối cổng Serial COM: {e}")
-#     isMicrobitConnected = False
-
-# mess = "" # Bộ đệm chứa dữ liệu thô từ cổng serial
-
-
-
-# #parse serial của micrrobit vd như !1:TEMP:32.5# hoặc !1:DO:6.5#
-# def parseSerialData(data_string):
-#     """
-#     Hàm phân tích chuỗi dữ liệu nhận được.
-#     Giả định mạch OhStem gửi chuỗi có định dạng: !<ID>:<LOẠI_CẢM_BIẾN>:<GIÁ_TRỊ>#
-#     Ví dụ: !1:TEMP:32.5#
-#     """
-#     try:
-#         # Xóa dấu ! và #
-#         clean_data = data_string.replace("!", "").replace("#", "")
-#         splitData = clean_data.split(":")
-        
-#         if len(splitData) >= 3:
-#             sensor_type = splitData[1] # Lấy "TEMP" hoặc "DO"
-#             value = float(splitData[2]) # Lấy giá trị số
-#             processData(sensor_type, value)
-#     except Exception as e:
-#         print(f"⚠️ Lỗi phân tích dữ liệu Serial: {data_string} -> {e}")
-
-
-# def readSerial():
-#     """Hàm đọc dữ liệu liên tục từ cổng Serial"""
-#     global mess
-#     if not isMicrobitConnected:
-#         return
-
-#     try:
-#         bytesToRead = ser.inWaiting()
-#         if bytesToRead > 0:
-#             # Đọc dữ liệu và giải mã
-#             mess = mess + ser.read(bytesToRead).decode("UTF-8")
-#             print(f"[DEBUG] Dữ liệu thô nhận được: {mess}")
-#             # Tìm kiếm chuỗi dữ liệu hoàn chỉnh nằm giữa '!' và '#'
-#             while ("#" in mess) and ("!" in mess):
-#                 start = mess.find("!")
-#                 end = mess.find("#")
-                
-#                 if start < end:
-#                     data = mess[start:end + 1]
-#                     parseSerialData(data) # Xử lý dữ liệu
-                    
-#                 if end == len(mess) - 1:
-#                     mess = ""
-#                 else:
-#                     mess = mess[end+1:]
-#     except Exception as e:
-#         pass
-
-
-
-# #fake serial cho DO và PH
-# def fakeSerial():
-#     # Chỉ tạo dữ liệu giả cho DO và PH để test bật/tắt PUMP và AERATOR
-#     fake_do = round(random.uniform(3.0, 8.0), 1)     
-#     fake_ph = round(random.uniform(3.0, 9.0), 1) 
-
-#     processData("DO", fake_do)
-#     processData("PH", fake_ph)
-
-
-
-# # ==========================================
-# # VÒNG LẶP CHÍNH (CẬP NHẬT)
-# # ==========================================
-# sync_counter = 0
-# last_upload_time = time.time()
-
-# while True:
-#     # print(".", end="", flush=True)
-#     # 1. Định kỳ đồng bộ cấu hình (Khoảng 3s một lần)
-#     if sync_counter % 3 == 0:
-#         sync_config_from_server(ao_id="AO_01")
-#         sync_schedules_from_server(tbtaibien_id="DK_FEEDER_01")
-#     sync_counter += 1
-
-#     # 2. Đọc dữ liệu từ cảm biến thực tế
-#     if isMicrobitConnected:
-#         readSerial()
-#         fakeSerial()
-#     else:
-#         pass
-
-#     # 3. Kiểm tra lịch cho ăn
-#     check_feeder_schedule()
-    
-#     # Giảm thời gian sleep xuống 1 giây (hoặc nhỏ hơn) để tránh bị tràn bộ đệm Serial
-#     time.sleep(3)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-##initial
-# import serial.tools.list_ports
-# import requests
-# import random
-# import time
-# import datetime
-# import sys
-# from Adafruit_IO import MQTTClient
-
-
-# schedules = []
-
-# config = {
-#     "DO": {"min": 5.0, "max": 7.0},   # Oxy < 5 -> Bật sục khí, > 7 -> Tắt sục khí
-#     "PH": {"min": 5.0, "max": 8.0},   # pH ngoài khoảng 5-8 -> Bật bơm, trong khoảng -> Tắt
-#     "TEMP": {"high": 28, "low": 25}, # Nhiệt độ > 40 -> Bật quạt, < 30 -> Tắt quạt
-#     "MODE": "AUTO" # Chế độ: AUTO hoặc MANUAL
-# }
-
-# # Trạng thái thiết bị hiện tại
-# device_status = {
-#     "AERATOR": "OFF", # Máy sục khí
-#     "PUMP": "OFF",    # Máy bơm
-#     "FAN": "OFF",     # Quạt
-#     "FEEDER": "OFF"   # Máy cho ăn
-# }
-
-# sensor_id_map = {
-#     "TEMP": "CB_TEMP_01",
-#     "DO": "CB_DO_01",
-#     "PH": "CB_PH_01"
-# }
-
-# # Thêm hàm đồng bộ lịch trình từ server
-# def sync_schedules_from_server(tbtaibien_id="DK_FEEDER_01"): # Sử dụng string ID
-#     global schedules
-#     try:
-#         # Đường dẫn route đã được chuẩn hóa trong routes/devices.js
-#         response = requests.get(f"http://127.0.0.1:5000/api/devices/gateway/{tbtaibien_id}", timeout=3)
-#         if response.status_code == 200:
-#             schedules = response.json().get("schedules", [])
-#             print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Đã đồng bộ Lịch trình thành công!")
-#     except Exception as e:
-#         print(f"Lỗi đồng bộ lịch trình: {e}")
-
-# # config threshold
-# def sync_config_from_server(ao_id="AO_01"): # Sử dụng string ID
-#     global config
-#     try:
-#         # Gọi API lấy cấu hình từ Backend
-#         response = requests.get(f"http://127.0.0.1:5000/api/ponds/{ao_id}/config", timeout=3)
-#         if response.status_code == 200:
-#             server_configs = response.json().get("configs", [])
-            
-#             # Cập nhật lại biến config của Gateway từ dữ liệu Database
-#             for item in server_configs:
-#                 loai = item["LoaiCamBien"] # VD: "TEMP", "DO", "PH"
-#                 if loai == "TEMP":
-#                     config["TEMP"]["low"] = item["min_value"]
-#                     config["TEMP"]["high"] = item["max_value"]
-#                 elif loai in ["DO", "PH"]:
-#                     config[loai]["min"] = item["min_value"]
-#                     config[loai]["max"] = item["max_value"]
-            
-#             print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Đã đồng bộ cấu hình từ Server thành công!")
-#     except Exception as e:
-#         print(f"Lỗi đồng bộ cấu hình (Server có thể đang tắt): {e}")
-
-
-# #gửi lệnh điều khiển xuống mạch
-# def control_device(device_name, action):
-#     global device_status, isMicrobitConnected
-#     if device_status[device_name] != action:
-#         device_status[device_name] = action
-#         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] LỆNH ĐIỀU KHIỂN: {device_name} -> {action}")
-        
-#         # --- THÊM ĐOẠN NÀY ĐỂ GỬI LỆNH XUỐNG MẠCH ---
-#         if isMicrobitConnected:
-#             try:
-#                 # Đóng gói lệnh gửi xuống, ví dụ: "!FAN:ON#" hoặc "!FAN:OFF#"
-#                 command = f"!{device_name}:{action}#\n"
-#                 # print(command) # Debug: In lệnh trước khi gửi
-#                 ser.write(command.encode("UTF-8"))
-#             except Exception as e:
-#                 print(f"❌ Lỗi gửi lệnh xuống mạch: {e}")
-
-# #logic điều khiển bặt tắt thiết bị
-# def processData(sensor_type, value):
-#     global config
-#     if sensor_type == "TEMP":
-#         print("\n===== DEBUG =====")
-#     print(f"Cảm biến {sensor_type} đo được: {value}")
-    
-#     # Chỉ tự động chạy nếu đang ở chế độ AUTO
-#     if config["MODE"] == "AUTO":
-#         if sensor_type == "DO":
-#             if value < config["DO"]["min"]:
-#                 control_device("AERATOR", "ON")
-#             elif value > config["DO"]["max"]:
-#                 control_device("AERATOR", "OFF")
-                
-#         elif sensor_type == "PH":
-#             if value < config["PH"]["min"] or value > config["PH"]["max"]:
-#                 control_device("PUMP", "ON")
-#             else:
-#                 control_device("PUMP", "OFF")
-                
-#         elif sensor_type == "TEMP":
-#             if value > config["TEMP"]["high"]:
-#                 control_device("FAN", "ON")
-#             elif value <= config["TEMP"]["low"]:
-#                 control_device("FAN", "OFF")
-
-#     # Gửi dữ liệu về backend
-#     try:
-#         # Schema2: Bỏ tự sinh "id", Database xử lý AUTO_INCREMENT
-#         res = requests.post("http://127.0.0.1:5000/api/sensors", json={
-#             "device_id": sensor_id_map.get(sensor_type, "CB_UNKNOWN"), 
-#             "value": value
-#         })
-        
-#         if res.status_code == 200:
-#             print(f"  -> Đã gửi {sensor_type} lên Server. Kết quả: 200 (OK)")
-#         else:
-#             print(f"  -> SERVER BÁO LỖI: {res.status_code} - Chi tiết: {res.text}")
-            
-#     except Exception as e:
-#         print(f"  -> LỖI GỬI API SENSOR: {e}")
-
-# def check_feeder_schedule():
-#     global schedules
-#     # Chỉ lấy phần Time (Giờ:Phút:Giây)
-#     now_time = datetime.datetime.now().time() 
-    
-#     should_run = False
-#     for sched in schedules:
-#         try:
-#             # MySQL TIME format is "HH:MM:SS"
-#             start = datetime.datetime.strptime(sched["start_time"], "%H:%M:%S").time()
-#             end = datetime.datetime.strptime(sched["end_time"], "%H:%M:%S").time()
-            
-#             # Kiểm tra giờ hiện tại có nằm trong khoảng lịch trình không
-#             if start <= now_time <= end:
-#                 should_run = True
-#                 break
-#         except ValueError:
-#             print(f"  -> Lỗi parsing thời gian lịch trình: {sched}")
-            
-#     if should_run:
-#         control_device("FEEDER", "ON")
-#     else:
-#         control_device("FEEDER", "OFF")
-
-
-
-# #kết nối với microbit
-# isMicrobitConnected = False
-# try:
-#     # Kết nối trực tiếp vào COM với baudrate 115200 (chuẩn của OhStem/Microbit)
-#     ser = serial.Serial(port="COM3", baudrate=115200, timeout=1)
-#     isMicrobitConnected = True
-#     print("✅ Đã kết nối thành công với mạch trên cổng COM5")
-# except Exception as e:
-#     print(f"❌ Lỗi kết nối cổng Serial COM: {e}")
-#     isMicrobitConnected = False
-
-# mess = "" # Bộ đệm chứa dữ liệu thô từ cổng serial
-
-
-
-# #parse serial của micrrobit vd như !1:TEMP:32.5# hoặc !1:DO:6.5#
-# def parseSerialData(data_string):
-#     """
-#     Hàm phân tích chuỗi dữ liệu nhận được.
-#     Giả định mạch OhStem gửi chuỗi có định dạng: !<ID>:<LOẠI_CẢM_BIẾN>:<GIÁ_TRỊ>#
-#     Ví dụ: !1:TEMP:32.5#
-#     """
-#     try:
-#         # Xóa dấu ! và #
-#         clean_data = data_string.replace("!", "").replace("#", "")
-#         splitData = clean_data.split(":")
-        
-#         if len(splitData) >= 3:
-#             sensor_type = splitData[1] # Lấy "TEMP" hoặc "DO"
-#             value = float(splitData[2]) # Lấy giá trị số
-#             processData(sensor_type, value)
-#     except Exception as e:
-#         print(f"⚠️ Lỗi phân tích dữ liệu Serial: {data_string} -> {e}")
-
-
-# def readSerial():
-#     """Hàm đọc dữ liệu liên tục từ cổng Serial"""
-#     global mess
-#     if not isMicrobitConnected:
-#         return
-
-#     try:
-#         bytesToRead = ser.inWaiting()
-#         if bytesToRead > 0:
-#             # Đọc dữ liệu và giải mã
-#             mess = mess + ser.read(bytesToRead).decode("UTF-8")
-#             print(f"[DEBUG] Dữ liệu thô nhận được: {mess}")
-#             # Tìm kiếm chuỗi dữ liệu hoàn chỉnh nằm giữa '!' và '#'
-#             while ("#" in mess) and ("!" in mess):
-#                 start = mess.find("!")
-#                 end = mess.find("#")
-                
-#                 if start < end:
-#                     data = mess[start:end + 1]
-#                     parseSerialData(data) # Xử lý dữ liệu
-                    
-#                 if end == len(mess) - 1:
-#                     mess = ""
-#                 else:
-#                     mess = mess[end+1:]
-#     except Exception as e:
-#         pass
-
-
-
-# #fake serial cho DO và PH
-# def fakeSerial():
-#     # Chỉ tạo dữ liệu giả cho DO và PH để test bật/tắt PUMP và AERATOR
-#     fake_do = round(random.uniform(3.0, 8.0), 1)     
-#     fake_ph = round(random.uniform(3.0, 9.0), 1) 
-
-#     processData("DO", fake_do)
-#     processData("PH", fake_ph)
-
-
-
-# # ==========================================
-# # VÒNG LẶP CHÍNH (CẬP NHẬT)
-# # ==========================================
-# sync_counter = 0
-# last_upload_time = time.time()
-
-# while True:
-#     # print(".", end="", flush=True)
-#     # 1. Định kỳ đồng bộ cấu hình (Khoảng 3s một lần)
-#     if sync_counter % 3 == 0:
-#         sync_config_from_server(ao_id="AO_01")
-#         sync_schedules_from_server(tbtaibien_id="DK_FEEDER_01")
-#     sync_counter += 1
-
-#     # 2. Đọc dữ liệu từ cảm biến thực tế
-#     if isMicrobitConnected:
-#         readSerial()
-#         fakeSerial()
-#     else:
-#         pass
-
-#     # 3. Kiểm tra lịch cho ăn
-#     check_feeder_schedule()
-    
-#     # Giảm thời gian sleep xuống 1 giây (hoặc nhỏ hơn) để tránh bị tràn bộ đệm Serial
-#     time.sleep(3)

@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../services/db');
 
+//flag khi có thây đổi
+let needsReload = false;
+
 router.get('/', async (req, res) => {
     try {
         const [rows] = await db.execute(`
@@ -17,32 +20,84 @@ router.get('/', async (req, res) => {
 
 // ADD pond (Thêm ao nuôi mới vào một khu vực)
 router.post('/', async (req, res) => {
-    // Lấy các trường dữ liệu theo đúng chuẩn schema2
     const { ma_ao_nuoi, ma_khu_vuc, dien_tich } = req.body; 
+    const connection = await db.getConnection(); // Sử dụng connection riêng để dùng Transaction
     
     try {
-        //kiểm tra giới hạn ao (VD: Tối đa 3 ao / 1 khu vực)
-        const [result] = await db.execute(
+        await connection.beginTransaction();
+
+        // 1. Kiểm tra giới hạn ao
+        const [result] = await connection.execute(
             'SELECT COUNT(*) as total FROM ao_nuoi WHERE ma_khu_vuc = ?', 
             [ma_khu_vuc]
         );
-        
         if (result[0].total >= 3) {
-            return res.status(400).json({ 
-                status: 'error', 
-                message: 'Khu vực này đã đạt tối đa 3 ao nuôi!' 
-            });
+            await connection.rollback();
+            return res.status(400).json({ status: 'error', message: 'Khu vực này đã đạt tối đa 3 ao nuôi!' });
         }
 
-        // Insert vào bảng ao_nuoi
-        await db.execute(
+        // 2. Thêm ao nuôi
+        await connection.execute(
             'INSERT INTO ao_nuoi (ma_ao_nuoi, ma_khu_vuc, dien_tich) VALUES (?, ?, ?)',
             [ma_ao_nuoi, ma_khu_vuc, dien_tich]
         );
-        
-        res.json({ status: 'added', message: 'Thêm ao nuôi thành công' });
+
+        // 3. Tự động tạo 1 Trạm (Gateway) cho ao này
+        const ma_tram = `TRAM_${ma_ao_nuoi}`;
+        await connection.execute(
+            'INSERT INTO tram_bien (ma_tram, ma_ao_nuoi, trang_thai_cloud) VALUES (?, ?, ?)',
+            [ma_tram, ma_ao_nuoi, 'CONNECTED']
+        );
+
+        // 4. Khởi tạo danh sách Cảm biến (DO, PH, TEMP)
+        const sensors = [
+            { id: `CB_DO_${ma_ao_nuoi}`, type: 'DO' },
+            { id: `CB_PH_${ma_ao_nuoi}`, type: 'PH' },
+            { id: `CB_TEMP_${ma_ao_nuoi}`, type: 'TEMP' }
+        ];
+
+        for (let s of sensors) {
+            await connection.execute('INSERT INTO thiet_bi_tai_bien (ma_thiet_bi, ma_tram, loai_phan_loai, trang_thai) VALUES (?, ?, ?, ?)', [s.id, ma_tram, 'CAM_BIEN', 'TAT']);
+            await connection.execute('INSERT INTO cam_bien (ma_thiet_bi, loai_cam_bien) VALUES (?, ?)', [s.id, s.type]);
+        }
+
+        // 5. Khởi tạo danh sách Thiết bị điều khiển (AERATOR, PUMP, FAN, FEEDER)
+        const actuators = [
+            { id: `DK_AERATOR_${ma_ao_nuoi}`, type: 'AERATOR' },
+            { id: `DK_PUMP_${ma_ao_nuoi}`, type: 'PUMP' },
+            { id: `DK_FAN_${ma_ao_nuoi}`, type: 'FAN' },
+            //{ id: `DK_FEEDER_${ma_ao_nuoi}`, type: 'FEEDER' } 
+        ];
+
+        for (let a of actuators) {
+            await connection.execute('INSERT INTO thiet_bi_tai_bien (ma_thiet_bi, ma_tram, loai_phan_loai, trang_thai) VALUES (?, ?, ?, ?)', [a.id, ma_tram, 'DIEU_KHIEN', 'TAT']);
+            await connection.execute('INSERT INTO thiet_bi_dieu_khien (ma_thiet_bi, loai_thiet_bi) VALUES (?, ?)', [a.id, a.type]);
+        }
+
+        // 6. Khởi tạo Rule mặc định nối Cảm biến với Thiết bị điều khiển
+        // Giả định: DO -> AERATOR, PH -> PUMP, TEMP -> FAN
+        const rules = [
+            { id: `RULE_DO_${ma_ao_nuoi}`, cb: `CB_DO_${ma_ao_nuoi}`, dk: `DK_AERATOR_${ma_ao_nuoi}`, min: 5.0, max: 7.0 },
+            { id: `RULE_PH_${ma_ao_nuoi}`, cb: `CB_PH_${ma_ao_nuoi}`, dk: `DK_PUMP_${ma_ao_nuoi}`, min: 5.0, max: 8.0 },
+            { id: `RULE_TEMP_${ma_ao_nuoi}`, cb: `CB_TEMP_${ma_ao_nuoi}`, dk: `DK_FAN_${ma_ao_nuoi}`, min: 25.0, max: 28.0 }
+        ];
+
+        for (let r of rules) {
+            await connection.execute(
+                'INSERT INTO rule_dieu_khien (ma_rule, ma_cam_bien, ma_tb_dieu_khien, min_value, max_value) VALUES (?, ?, ?, ?, ?)',
+                [r.id, r.cb, r.dk, r.min, r.max]
+            );
+        }
+
+        await connection.commit();
+        needsReload = true; //bật cờ sau khi add ao
+        res.json({ status: 'added', message: 'Thêm ao nuôi và khởi tạo hệ thống thiết bị thành công' });
+
     } catch (error) {
+        await connection.rollback();
         res.status(500).json({ error: error.message });
+    } finally {
+        connection.release();
     }
 });
 
@@ -107,10 +162,80 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
     try {
         await db.execute('DELETE FROM ao_nuoi WHERE ma_ao_nuoi = ?', [req.params.id]);
+        needsReload = true; //bật cờ sau khi xóa ao
         res.json({ status: 'deleted', message: 'Đã xóa ao nuôi' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+});
+
+// lấy dữ liệu của ao để khởi tạo cho Gateway (main.py) khi mới khởi động
+router.get('/gateway-init', async (req, res) => {
+    try {
+        // 1. Lấy danh sách tất cả các Trạm (đóng vai trò là Gateway) và Ao nuôi
+        const [stations] = await db.execute(`
+            SELECT tb.ma_tram as gateway_id, tb.ma_ao_nuoi as ao_id
+            FROM tram_bien tb
+        `);
+
+        // 2. Lấy toàn bộ thiết bị (cảm biến & điều khiển) và join với bảng chi tiết tương ứng
+        const [devices] = await db.execute(`
+            SELECT 
+                tbtb.ma_tram,
+                tbtb.loai_phan_loai,
+                cb.loai_cam_bien,
+                cb.ma_thiet_bi as ma_cam_bien,
+                dk.loai_thiet_bi,
+                dk.ma_thiet_bi as ma_dieu_khien
+            FROM thiet_bi_tai_bien tbtb
+            LEFT JOIN cam_bien cb ON tbtb.ma_thiet_bi = cb.ma_thiet_bi AND tbtb.loai_phan_loai = 'CAM_BIEN'
+            LEFT JOIN thiet_bi_dieu_khien dk ON tbtb.ma_thiet_bi = dk.ma_thiet_bi AND tbtb.loai_phan_loai = 'DIEU_KHIEN'
+        `);
+
+        // 3. Xử lý dữ liệu (Map & Filter) để tạo ra mảng JSON theo yêu cầu của main.py
+        const result = stations.map(station => {
+            // Lọc ra các thiết bị thuộc về trạm hiện tại
+            const stationDevices = devices.filter(d => d.ma_tram === station.gateway_id);
+            
+            // Gom các ID cảm biến thành 1 object: { "TEMP": "CB01", "DO": "CB02", ... }
+            const sensor_ids = {};
+            stationDevices
+                .filter(d => d.loai_phan_loai === 'CAM_BIEN' && d.ma_cam_bien)
+                .forEach(sensor => {
+                    // UPPERCASE để đảm bảo chuẩn format với key trong Python (VD: temp -> TEMP)
+                    const loaiCB = (sensor.loai_cam_bien || '').toUpperCase();
+                    sensor_ids[loaiCB] = sensor.ma_cam_bien; 
+                });
+
+            // Tìm thiết bị điều khiển đóng vai trò là Máy Cho Ăn (Feeder)
+            // LƯU Ý: Chữ 'FEEDER' ở đây phải khớp với data bạn nhập trong cột loai_thiet_bi của DB
+            const feeder = stationDevices.find(d => 
+                d.loai_phan_loai === 'DIEU_KHIEN' && 
+                (d.loai_thiet_bi === 'FEEDER' || d.loai_thiet_bi === 'MAY_CHO_AN')
+            );
+
+            return {
+                gateway_id: station.gateway_id,
+                ao_id: station.ao_id,
+                feeder_id: feeder ? feeder.ma_dieu_khien : null,
+                sensor_ids: sensor_ids
+            };
+        });
+
+        // 4. Trả về kết quả
+        res.json(result);
+
+    } catch (error) {
+        console.error("Lỗi khi init gateway:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// API kiểm tra trạng thái dành riêng cho main.py
+router.get('/check-reload', (req, res) => {
+    res.json({ reload: needsReload });
+    // Sau khi trả về true, reset lại cờ về false để không reload lặp lại
+    if (needsReload) needsReload = false; 
 });
 
 module.exports = router;;
